@@ -1,0 +1,11 @@
+# 语言包：版权归 Anthropic，不随仓库分发（见 packs/README.md）
+packs/*.json
+
+# 脚本运行时产生的备份
+scripts/backups/
+
+# 系统与编辑器
+.DS_Store
+*.swp
+__pycache__/
+*.pyc

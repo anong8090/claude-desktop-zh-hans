@@ -2,8 +2,8 @@
 
 让 **Claude Desktop** 在**第三方 API 反代模式**下也显示中文界面。
 
-> 实测环境：macOS · Claude Desktop **3.6556.2** · Apple Silicon
-> 原理适用于所有 Electron 版 Claude Desktop；版本升级后需要重跑一次注入脚本。
+> 实测环境：macOS · Claude Desktop **3.6556.2 / 4.29.0** · Apple Silicon
+> 4.29.0 起前端从目录改为 `ion-dist.asar` 并启用完整性校验，脚本已自动适配（见下文「结构变化」）。
 
 **English**: [README.en.md](README.en.md)
 
@@ -42,8 +42,14 @@ Claude Desktop 的界面语言有两条路径：
 | 侧边栏 | Projects / Scheduled / Customize | 项目 / 定时任务 / 自定义 |
 | 账号区 | anong · Gateway | anong · 网关 |
 
-覆盖率（3.6556.2）：**key 覆盖 100%，值实际中文化 98.88%**。
-剩下 417 条英文是官方包本身就没译的（`Artifacts`、`Cowork`、`Code` 等产品名），不是漏翻。
+覆盖率：
+
+| 版本 | key 覆盖 | 实际中文化 |
+|---|---|---|
+| 3.6556.2 | 100% | 98.88% |
+| 4.29.0 | 99.02%（39,095 / 39,482） | 同左 |
+
+剩下几百条英文是官方包本身就没译的（`Artifacts`、`Cowork`、`Code` 等产品名），不是漏翻。
 
 ---
 
@@ -56,6 +62,21 @@ Claude Desktop 的界面语言有两条路径：
 ③ 默认 locale     var ry="zh-Hans" / var yy="zh-Hans"（原为 "en-US"）
 ④ 重签名          必须带 --entitlements，否则工作区 VM 报废（见下）
 ```
+
+### Claude 4.29+ 的结构变化（脚本已自动处理）
+
+4.29.0 把原来可直接改的 `Resources/ion-dist/` **目录**打成了单个 `ion-dist.asar`（191 MB），
+并在 `Info.plist` 里记录其 SHA256、启用 Electron fuse `EnableEmbeddedAsarIntegrityValidation`。
+于是多出三步，少做任何一步都启动不了：
+
+| 步骤 | 为什么 |
+|---|---|
+| 解包 → 补丁 → **重打包** | 前端不存在磁盘目录了，只能用 `scripts/asar-tool.js`（无依赖）解包再打回 |
+| 关闭 `EnableEmbeddedAsarIntegrityValidation` | 重打包后哈希必然变化，而 ad-hoc 签名下 Electron 取不到 integrity → 启动直接 FATAL |
+| 重签必须 `--deep` | 改 fuse 会让 `Electron Framework` 签名失效；framework 一旦 ad-hoc 重签，helper 若仍是官方 Team ID，library validation 会以 `different Team IDs` 拒绝加载 |
+
+`reinject.sh` 会自动识别结构（`ion-dist.asar` 或 `ion-dist/`）并走对应分支，
+`verify.sh` 也会直接从 asar 里读文件校验，不需要解包。
 
 **为什么必须双别名**：前端选语言是**精确名匹配，没有模糊回退**。
 而主进程下发的 `--lang` 由系统区域推导：
@@ -131,15 +152,16 @@ open -a Claude.app
 ```
 scripts/
   extract-zh-pack.sh   从本机 Chromium 缓存提取官方中文包（离线）
-  reinject.sh          一键注入：白名单 + 语言包 + 重签名（幂等，带 --dry-run）
-  verify.sh            四项验收：语言包 / 白名单 / 签名 / entitlements
+  reinject.sh          一键注入：白名单 + 语言包 + 重打包 + 重签名（幂等，带 --dry-run）
+  verify.sh            六项验收：语言包 / 白名单 / 签名 / fuse / locale / 残留
+  asar-tool.js         无依赖 asar 读写（list / extract / pack / cat），4.29+ 必需
   merge-zh.py          多包合并 + ICU 占位符校验（跨版本补缺用）
 resources/
   entitlements-adhoc.plist   ad-hoc 签名模板（漏了会毁掉工作区 VM）
   dynamic-zh-Hans.json       动态文案 49 条（模型档位 / 思考强度）
 docs/
   HOW-IT-WORKS.md      原理详解、版本适配、语言包合并
-  TROUBLESHOOTING.md   界面还是英文 / 工作区报错 / 装了没反应
+  TROUBLESHOOTING.md   界面还是英文 / 工作区报错 / 启动即 FATAL
   FREE-TOKENS.md       免费 API 来源清单 + CC Switch 配置
 packs/
   zh-Hans.json         不放仓库（见 packs/README.md），本地生成
@@ -188,24 +210,29 @@ packs/
 | 装完还是英文 | 白名单缺运行时 `--lang` 值（多半缺 `zh-CN` 别名） | `./scripts/verify.sh` 看第 2 项 |
 | 文件都对，还是英文 | 进程没重载 | 完全退出 Claude 再开（`--restart`） |
 | 工作区报 `installation appears to be invalid` | 重签名丢了 virtualization entitlement | 用仓库的 `resources/entitlements-adhoc.plist` 重签 |
+| 启动即 `FATAL: Failed to get integrity for validatable asar archive` | 4.29+ 重打包后没关完整性校验 fuse | `reinject.sh --force` 会自动关；手动见 docs/TROUBLESHOOTING.md |
+| `dyld: ... different Team IDs` | 4.29+ 只签了 framework 没 `--deep` | 4.29+ 必须 `--deep` 统一重签 |
 | 部分界面英文 | 语言包比 App 旧 / 官方未译 | `extract-zh-pack.sh` 重取，或 `merge-zh.py` 合并 |
 | 重跑脚本 `whitelist array not found` | 已打过补丁，数组不是原始形态 | 用本仓库的 `reinject.sh`（同时认三种状态） |
-| App 更新后中文没了 | `ion-dist` 被官方包覆盖 | 重跑 `./scripts/reinject.sh --restart` |
+| App 更新后中文没了 | `ion-dist` 被官方包覆盖（4.29+ 是整个 asar 被替换） | 重跑 `./scripts/reinject.sh --restart` |
 
 ---
 
 ## 卸载 / 还原
 
 ```bash
-# 1) 删掉语言包（前端会回落 en-US，不需要恢复 JS）
+# 目录模式（<= 3.x）：删掉语言包即可，前端回落 en-US
 rm -f /Applications/Claude.app/Contents/Resources/ion-dist/i18n/{zh-Hans,zh-CN}.json
 rm -f /Applications/Claude.app/Contents/Resources/ion-dist/i18n/dynamic/{zh-Hans,zh-CN}.json
 
-# 2) 白名单补丁保留也无害（只是多两个不命中的语言选项）。
-#    想彻底还原，用 reinject.sh 留下的备份：
-ls scripts/backups/whitelist-*.js.bak
-#    覆盖回原位后重签名
-codesign --force --sign - --entitlements resources/entitlements-adhoc.plist /Applications/Claude.app
+# asar 模式（4.29+）：还原注入脚本留下的原始包备份
+ls scripts/backups/ion-dist-*-original.asar
+ditto scripts/backups/ion-dist-4.29.0-original.asar \
+      /Applications/Claude.app/Contents/Resources/ion-dist.asar
+
+# 两种模式都要重签（带 entitlements，别用裸 --sign -）
+codesign --force --deep --sign - \
+  --entitlements resources/entitlements-adhoc.plist /Applications/Claude.app
 ```
 
 最彻底的还原是重装 Claude Desktop（官网 dmg 覆盖安装，官方签名一并恢复）。

@@ -269,3 +269,77 @@ PY
 ```
 
 值等于英文 → 官方没译；查不到 key → 前端硬编码。
+
+---
+
+## 9. Claude 4.29+：前端变成 asar 之后
+
+3.x 时代前端是磁盘目录 `Contents/Resources/ion-dist/`，改文件即可。
+4.29 起同样的内容被打成 `ion-dist.asar`（191 MB），并加了两道锁。原理层面变了三点：
+
+### 9.1 改哪里没变，怎么改变了
+
+白名单、语言包、默认 locale 的位置和结构**完全一样**，只是现在都装在 asar 容器里：
+
+```
+ion-dist.asar
+├── i18n/                      ← 语言包（要新增 zh-Hans.json / zh-CN.json）
+├── i18n/dynamic/              ← 动态文案 49 条
+└── assets/v1/shared-52-*.js   ← 白名单数组 + 默认 locale
+```
+
+所以流程从"直接写文件"变成 **解包 → 打补丁 → 重打包 → 写回**。
+仓库自带 `scripts/asar-tool.js`（零依赖，不需要 npm install），只做 list / extract / pack / cat。
+
+### 9.2 完整性校验：为什么必须关 fuse
+
+Electron 有个 fuse 叫 `EnableEmbeddedAsarIntegrityValidation`。开启时：
+
+1. `Info.plist` 的 `ElectronAsarIntegrity` 里存着 asar 的 SHA256；
+2. 启动时 Electron 校验实际 asar 与哈希是否一致；
+3. 哈希不在 asar 文件里，而是由**签名**保护的 —— 校验要求应用有可读的签名身份。
+
+ad-hoc 签名（`--sign -`）没有 Team ID，Electron 取不到这段 integrity 数据，
+于是直接 `FATAL: Failed to get integrity for validatable asar archive`。
+重打包又必然改变哈希，所以这条路走不通 —— 干脆关掉 fuse：
+
+```bash
+npx --yes @electron/fuses write --app /Applications/Claude.app \
+  EnableEmbeddedAsarIntegrityValidation=off
+```
+
+关掉后 `Info.plist` 里的哈希就不用维护了（改了也不影响）。
+
+### 9.3 签名范围：为什么 asar 模式必须 --deep
+
+- **目录模式**：主 bundle 签名即可。嵌套的 `Claude Helper.app` 保留官方签名，
+  macOS 不要求主程序与 helper 同 Team（helper 是独立进程）。
+- **asar 模式**：改 fuse 会写 `Electron Framework` 的二进制，使其签名失效，必须重签；
+  一旦 framework 变成 ad-hoc，而 helper 仍是官方 Team `Q6L2SF6YDW`，
+  `dyld` 的 library validation 会以 `different Team IDs` 拒绝加载。
+
+所以 asar 模式的顺序是固定的：**先签 framework → 再 `--deep` 整体重签**，全部统一为 ad-hoc。
+
+### 9.4 版本适配的检查顺序（4.29+）
+
+```bash
+RES=/Applications/Claude.app/Contents/Resources
+
+# 1) 是目录还是 asar
+ls -d "$RES/ion-dist" "$RES/ion-dist.asar" 2>/dev/null
+
+# 2) asar 模式下先看 i18n 里有哪些语言
+node scripts/asar-tool.js list "$RES/ion-dist.asar" i18n/
+
+# 3) 白名单在哪（通常仍是 shared-52-<hash>.js）
+node scripts/asar-tool.js list "$RES/ion-dist.asar" assets/v1/ | grep shared-52
+
+# 4) 看数组当前形态
+node scripts/asar-tool.js cat "$RES/ion-dist.asar" assets/v1/shared-52-XXX.js \
+  | grep -o '"id-ID"[^]]*]'
+
+# 5) fuse 状态
+npx --yes @electron/fuses read --app /Applications/Claude.app | grep AsarIntegrity
+```
+
+具体报错与修法见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) 第 10 节。

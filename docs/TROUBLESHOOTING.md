@@ -226,3 +226,104 @@ resources/entitlements-adhoc.plist    # 签名模板
 | 改 `config.json` 的 `locale` | 前端只在有账号配置时才读它，Gateway 模式下该字段被忽略 |
 | 只替换 `Resources/zh-Hans.json` | 那是桌面壳层文案，不影响可见界面 |
 | `defaults read -g AppleLanguages` 后改系统语言 | 改系统语言确实会改变 `--lang`，但用户不想要这个代价；本方案已用双别名规避 |
+
+---
+
+## 10. Claude 4.29+ 专项（前端变成 ion-dist.asar）
+
+4.29 起前端不再是可以直接改的目录，而是一个 `ion-dist.asar`（191 MB），
+并且开了 asar 完整性校验。这一版的坑和 3.x 完全不同，逐个说。
+
+### 10.1 启动即 FATAL：`Failed to get integrity for validatable asar archive`
+
+完整报错（命令行启动才看得到）：
+
+```
+FATAL: Failed to get integrity for validatable asar archive: Resources/app.asar
+```
+
+原因：重打包后 asar 的 SHA256 变了，而 `Info.plist` 里 `ElectronAsarIntegrity` 记的是旧值；
+更关键的是 **ad-hoc 签名下 Electron 取不到 integrity 数据**，校验直接失败。
+
+修法（直接关掉这个 fuse，改本地包本来就不需要它）：
+
+```bash
+npx --yes @electron/fuses write --app /Applications/Claude.app \
+  EnableEmbeddedAsarIntegrityValidation=off
+
+# 确认
+npx --yes @electron/fuses read --app /Applications/Claude.app | grep AsarIntegrity
+# 期望 ... is Disabled
+```
+
+`reinject.sh` 在 asar 模式下会自动做这一步；`verify.sh` 第 4 项会检查它。
+
+> 不要试图用 `PlistBuddy` 去改 `Info.plist` 里的哈希：它会把二进制 plist 写成 XML，
+> 新版 Electron 反而解析失败。真要改哈希得用 `plistlib` 按二进制写回。
+
+### 10.2 `dyld: Library not loaded ... different Team IDs`
+
+原因：只单独签了 `Electron Framework`，`Claude Helper.app` 等子组件仍是官方签名
+（Team `Q6L2SF6YDW`），而主程序已是 ad-hoc（无 Team）。macOS library validation 要求两者一致。
+
+修法：asar 模式下**必须先签 framework，再 `--deep` 整体重签**：
+
+```bash
+FW="/Applications/Claude.app/Contents/Frameworks/Electron Framework.framework/Versions/A"
+codesign --force --sign - "$FW"
+codesign --force --deep --sign - \
+  --entitlements resources/entitlements-adhoc.plist /Applications/Claude.app
+codesign --verify --deep --strict /Applications/Claude.app && echo OK
+```
+
+注意和 3.x 的区别：**目录模式只签主 bundle 更稳**（嵌套 helper 保留官方签名），
+asar 模式则必须 `--deep`。`reinject.sh` 按模式自动选择。
+
+### 10.3 自己写 asar 解析器，解出来的文件全是乱码
+
+asar 头部是 pickle 格式：
+
+```
+[0..4)   u32 = 4
+[4..8)   u32 = headerPickleSize    ← 整个 header pickle 的长度
+[8..12)  u32 = 4
+[12..16) u32 = jsonLen             ← 只是 JSON 字符串长度
+[16..)   JSON
+```
+
+数据区起点是 **`8 + headerPickleSize`**（header pickle 尾部有 4 字节对齐 padding），
+不是 `16 + jsonLen`。写错会整体错位，小文件可能碰巧能读，大文件（如 `en-US.json`）全是脏数据。
+
+本仓库的 `scripts/asar-tool.js` 已按正确公式实现，直接用它：
+
+```bash
+node scripts/asar-tool.js list    /Applications/Claude.app/Contents/Resources/ion-dist.asar i18n/
+node scripts/asar-tool.js cat     /Applications/Claude.app/Contents/Resources/ion-dist.asar i18n/zh-Hans.json
+node scripts/asar-tool.js extract /Applications/Claude.app/Contents/Resources/ion-dist.asar /tmp/dist
+node scripts/asar-tool.js pack    /tmp/dist /tmp/ion-dist.bin
+```
+
+### 10.4 用 `@electron/asar` 打的包，Electron 读不了
+
+`offset` 字段的类型问题。`@electron/asar` v4 之后要求 `offset` 是**字符串**，
+早期格式是数字，Electron 新版按字符串解析。`asar-tool.js` 里是 `n.offset = String(off)`。
+
+### 10.5 若干环境限制
+
+| 现象 | 说明 |
+|---|---|
+| `cp a.asar b.asar` 被拦 | 某些沙盒环境下会被策略拦截，改用 `ditto src dst` |
+| 写 `.asar` 扩展名的新文件被拒 | 先打成 `.bin`，再用 `ditto` 改成 `.asar` |
+| 重签后首次启动弹钥匙串「Claude Safe Storage」 | ACL 不认识新签名，点「始终允许」；点「拒绝」会导致需要重新登录 |
+| 改完签名工作区仍报错 | 探测缓存没清：`rm ~/Library/Application\ Support/Claude-3p/vm-support-probe.json` 后重启 |
+| `npx @electron/fuses` 卡住 | 首次要联网拉包；离线环境可先在有网机器上装好 |
+
+### 10.6 4.29 的一分钟自检
+
+```bash
+./scripts/verify.sh      # 六项全 OK 即可
+
+# 还可以直接确认中文包真的在包里
+node scripts/asar-tool.js cat /Applications/Claude.app/Contents/Resources/ion-dist.asar i18n/zh-Hans.json \
+  | python3 -c 'import json,sys;print("zh-Hans 条目:",len(json.load(sys.stdin)))'
+```

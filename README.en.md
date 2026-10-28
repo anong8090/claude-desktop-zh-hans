@@ -3,8 +3,14 @@
 Make **Claude Desktop** display a Chinese UI when it's pointed at a **third-party API relay**
 (CC Switch → Gateway / "3p" mode), where the account-based language setting is unavailable.
 
-> Tested on macOS · Claude Desktop **3.6556.2** · Apple Silicon
+> Tested on macOS · Claude Desktop **3.6556.2** and **4.29.0** · Apple Silicon
 > 中文说明见 [README.md](README.md)
+
+> **Claude 4.29+ note**: the front-end moved from `Resources/ion-dist/` (a directory) to
+> `Resources/ion-dist.asar` (a 191 MB archive) and now enforces asar integrity. The scripts
+> detect the layout automatically: asar mode extracts → patches → repacks, disables the
+> `EnableEmbeddedAsarIntegrityValidation` fuse, then re-signs with `--deep`.
+> Details: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) §10.
 
 ---
 
@@ -111,7 +117,8 @@ brotli body) and decompresses it. Fully offline, no login, no proxy.
 
 ## Verification matters
 
-`./scripts/verify.sh` checks four things. Item 2 is the one most tutorials get wrong:
+`./scripts/verify.sh` checks six things (the extra two are asar-integrity fuse state and leftover
+misconfigurations). Item 2 is the one most tutorials get wrong:
 when Claude isn't running you can't read `--lang`, and `grep -q ""` is **always true** —
 so a broken setup reports OK. This script prints `SKIP` instead of `PASS` in that case.
 

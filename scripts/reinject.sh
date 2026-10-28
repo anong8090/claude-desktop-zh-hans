@@ -51,8 +51,9 @@ die()  { print -r -- "[FAIL] $*" >&2; exit 1; }
 # ---------- 定位资源（兼容仓库结构与 ~/Documents/claude-zh-hans 结构）----------
 find_pack() {
   local name="$1"
-  for c in "$SCRIPT_DIR/$name" "$SCRIPT_DIR/../packs/$name" \
-           "$SCRIPT_DIR/../resources/$name" "$HOME/Documents/claude-zh-hans/$name"; do
+  for c in "$SCRIPT_DIR/$name" "$SCRIPT_DIR/originals/$name" \
+           "$SCRIPT_DIR/../packs/$name" "$SCRIPT_DIR/../resources/$name" \
+           "$HOME/Documents/claude-zh-hans/$name" "$HOME/Documents/claude-zh-hans/originals/$name"; do
     [[ -f "$c" ]] && { print -r -- "$c"; return 0; }
   done
   return 1

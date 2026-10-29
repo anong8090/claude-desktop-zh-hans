@@ -118,13 +118,25 @@ print -r -- "4) asar 完整性校验 fuse"
 if [[ $MODE != asar ]]; then
   skip "目录模式不需要"
 else
-  FUSEOUT=$(cd "$SCRIPT_DIR" && npx --yes @electron/fuses read --app "$APP" 2>/dev/null)
-  if print -r -- "$FUSEOUT" | grep -q "EnableEmbeddedAsarIntegrityValidation is Disabled"; then
-    pass "EnableEmbeddedAsarIntegrityValidation 已关闭"
-  elif print -r -- "$FUSEOUT" | grep -q "EnableEmbeddedAsarIntegrityValidation is Enabled"; then
+  # 优先离线直读二进制（不依赖网络）；读不到再回退 npx
+  FW="$APP/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
+  FUSEOUT=""
+  if command -v node >/dev/null 2>&1 && [[ -f "$SCRIPT_DIR/patch-fuse.js" && -f "$FW" ]]; then
+    FUSEOUT=$(node "$SCRIPT_DIR/patch-fuse.js" --dry-run "$FW" 2>/dev/null)
+  fi
+  if print -r -- "$FUSEOUT" | grep -q "EnableEmbeddedAsarIntegrityValidation = 0"; then
+    pass "EnableEmbeddedAsarIntegrityValidation 已关闭（离线读取）"
+  elif print -r -- "$FUSEOUT" | grep -q "EnableEmbeddedAsarIntegrityValidation = 1"; then
     fail "完整性校验仍开启 —— 重打包后启动会 FATAL，跑 reinject.sh --force 修掉"
   else
-    skip "读不到 fuse 状态（npx @electron/fuses 不可用或需联网）"
+    FUSEOUT=$(cd "$SCRIPT_DIR" && npx --yes @electron/fuses read --app "$APP" 2>/dev/null)
+    if print -r -- "$FUSEOUT" | grep -q "EnableEmbeddedAsarIntegrityValidation is Disabled"; then
+      pass "EnableEmbeddedAsarIntegrityValidation 已关闭"
+    elif print -r -- "$FUSEOUT" | grep -q "EnableEmbeddedAsarIntegrityValidation is Enabled"; then
+      fail "完整性校验仍开启 —— 重打包后启动会 FATAL，跑 reinject.sh --force 修掉"
+    else
+      skip "读不到 fuse 状态（patch-fuse.js 未匹配到 magic，npx 也不可用）"
+    fi
   fi
 fi
 

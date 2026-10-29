@@ -5,6 +5,12 @@
 > 实测环境：macOS · Claude Desktop **3.6556.2 / 4.29.0** · Apple Silicon
 > 4.29.0 起前端从目录改为 `ion-dist.asar` 并启用完整性校验，脚本已自动适配（见下文「结构变化」）。
 
+> [!IMPORTANT]
+> **Claude Desktop 4.x（4.29.0 起）结构变了**：前端不再是 `ion-dist/` 目录，而是 `ion-dist.asar`，
+> 且 Electron 打开了 asar 完整性校验 + 团队 ID 校验，3.x 的脚本直接跑会失败。
+> `reinject.sh` 已能自动识别两种结构；若机器**没网、拉不到 `npx @electron/fuses`**，改用离线版
+> `./scripts/inject-ion.sh`。原理与三个新坑见 **[docs/CLAUDE-4X.md](docs/CLAUDE-4X.md)**。
+
 **English**: [README.en.md](README.en.md)
 
 ---
@@ -77,6 +83,10 @@ Claude Desktop 的界面语言有两条路径：
 
 `reinject.sh` 会自动识别结构（`ion-dist.asar` 或 `ion-dist/`）并走对应分支，
 `verify.sh` 也会直接从 asar 里读文件校验，不需要解包。
+
+关 fuse 这一步由 `scripts/patch-fuse.js` **直接改二进制**完成（改两个架构各一处），
+不依赖 `npx @electron/fuses`，断网也能跑；只有二进制结构识别不出来时才回退到 npx。
+4.x 的签名模板自动切到 `resources/entitlements-4x.plist`（多了 `disable-library-validation`）。
 
 **为什么必须双别名**：前端选语言是**精确名匹配，没有模糊回退**。
 而主进程下发的 `--lang` 由系统区域推导：
@@ -151,15 +161,20 @@ open -a Claude.app
 
 ```
 scripts/
-  extract-zh-pack.sh   从本机 Chromium 缓存提取官方中文包（离线）
-  reinject.sh          一键注入：白名单 + 语言包 + 重打包 + 重签名（幂等，带 --dry-run）
+  reinject.sh          主入口：白名单 + 语言包 + 重打包 + 重签名（3.x/4.x 自动识别，幂等，带 --dry-run）
   verify.sh            六项验收：语言包 / 白名单 / 签名 / fuse / locale / 残留
   asar-tool.js         无依赖 asar 读写（list / extract / pack / cat），4.29+ 必需
+  inject-ion.sh        4.x 离线版：重打包 + 关 fuse + 深度重签，全程不联网（带 --dry-run）
+  repack-ion.js        4.x 离线版重打包器：注入语言包 / 白名单，逐文件重算 integrity
+  patch-fuse.js        直改二进制关 asar 完整性校验 fuse（reinject.sh 优先用它，离线替代 npx @electron/fuses）
+  extract-zh-pack.sh   从本机 Chromium 缓存提取官方中文包（离线）
   merge-zh.py          多包合并 + ICU 占位符校验（跨版本补缺用）
 resources/
-  entitlements-adhoc.plist   ad-hoc 签名模板（漏了会毁掉工作区 VM）
+  entitlements-adhoc.plist   ad-hoc 签名模板（3.x）
+  entitlements-4x.plist      ad-hoc 签名模板（4.x，多了 disable-library-validation）
   dynamic-zh-Hans.json       动态文案 49 条（模型档位 / 思考强度）
 docs/
+  CLAUDE-4X.md         4.x 适配说明：结构差异、三个新坑、覆盖率
   HOW-IT-WORKS.md      原理详解、版本适配、语言包合并
   TROUBLESHOOTING.md   界面还是英文 / 工作区报错 / 启动即 FATAL
   FREE-TOKENS.md       免费 API 来源清单 + CC Switch 配置

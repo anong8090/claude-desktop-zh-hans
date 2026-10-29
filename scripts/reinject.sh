@@ -76,6 +76,14 @@ else
   die "既没有 $RES/ion-dist.asar 也没有 $RES/ion-dist —— Claude 前端结构又变了，需人工适配"
 fi
 
+# 4.x（asar 模式）换用专门的签名模板：多一条 disable-library-validation。
+# 因为 --deep 会把 Electron Framework 重签成 ad-hoc（无 Team ID），
+# 缺这条时 dyld 会以 "different Team IDs" 拒绝加载。
+if [[ $MODE == asar ]]; then
+  ENT_4X=$(find_pack entitlements-4x.plist 2>/dev/null || true)
+  [[ -n "$ENT_4X" ]] && ENT="$ENT_4X"
+fi
+
 info "Claude 版本: $VER    结构模式: $MODE"
 info "语言包: $PACK_ZIP"
 info "动态包: $PACK_DYN"
@@ -247,14 +255,36 @@ sign_app() {
 # 并开启 EnableEmbeddedAsarIntegrityValidation。重打包后哈希必然变化，
 # 而 ad-hoc 签名下 Electron 取不到 integrity 数据，启动直接 FATAL。
 disable_asar_integrity_fuse() {
+  local fw="$APP/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
+  local node_bin
+  node_bin="$(command -v node 2>/dev/null || true)"
+
+  # 路径 1（优先）：本地直改二进制，离线、不依赖 npx
+  if [[ -n "$node_bin" && -f "$SCRIPT_DIR/patch-fuse.js" && -f "$fw" ]]; then
+    local state
+    state="$("$node_bin" "$SCRIPT_DIR/patch-fuse.js" --dry-run "$fw" 2>/dev/null || true)"
+    if print -r -- "$state" | grep -q "= 1"; then
+      info "关闭 EnableEmbeddedAsarIntegrityValidation fuse（离线直改二进制）..."
+      "$node_bin" "$SCRIPT_DIR/patch-fuse.js" "$fw" >/dev/null \
+        || die "fuse 关闭失败，二进制结构可能变化：见 docs/CLAUDE-4X.md"
+      ok "asar 完整性校验已关闭（离线）"
+      return 0
+    elif print -r -- "$state" | grep -q "= 0"; then
+      ok "asar 完整性校验已是关闭状态"
+      return 0
+    fi
+  fi
+
+  # 路径 2（回退）：npx @electron/fuses，需要联网
   local out
   out=$(cd "$SCRIPT_DIR" && npx --yes @electron/fuses read --app "$APP" 2>/dev/null || true)
   if print -r -- "$out" | grep -q "EnableEmbeddedAsarIntegrityValidation is Enabled"; then
     info "关闭 EnableEmbeddedAsarIntegrityValidation fuse（重打包后必须）..."
     (cd "$SCRIPT_DIR" && npx --yes @electron/fuses write --app "$APP" \
         EnableEmbeddedAsarIntegrityValidation=off >/dev/null 2>&1) \
-      || die "fuse 关闭失败（需要联网让 npx 拉 @electron/fuses）。手动执行：
-      npx --yes @electron/fuses write --app \"$APP\" EnableEmbeddedAsarIntegrityValidation=off"
+      || die "fuse 关闭失败。手动执行：
+      node \"$SCRIPT_DIR/patch-fuse.js\" \"$fw\"
+      或（需联网）：npx --yes @electron/fuses write --app \"$APP\" EnableEmbeddedAsarIntegrityValidation=off"
     ok "asar 完整性校验已关闭"
   else
     ok "asar 完整性校验已是关闭状态"
